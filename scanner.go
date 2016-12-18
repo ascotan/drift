@@ -8,11 +8,16 @@ import (
 
 const (
   EOF = -(iota + 1)
-  UNKNOWN
+  IDENT
+  COMMENT
+  WHITESPACE
 )
 
 type token struct {
-  runes []rune
+  runes  []rune
+  ttype  int
+  offset int64  // starting offset (in runes not bytes) token was consumed at
+  lineno int    // starting lineno the token was consumed from
 }
 
 type scanner struct {
@@ -140,11 +145,13 @@ func (s *scanner) isWhitespace(runes []rune) bool {
 func (s *scanner) scanForWhitespace() (*token, error) {
   var rs []rune
   offset := s.offset
+  lineno := s.lineno
 
   // back out if we are scanning starting from non whitespace
   runes, err := s.peek(1)
   if err != nil && err != io.EOF {
     s.offset = offset
+    s.lineno = lineno
     return nil, err
   }
 
@@ -159,6 +166,7 @@ func (s *scanner) scanForWhitespace() (*token, error) {
         break
       }
       s.offset = offset
+      s.lineno = lineno
       return nil, err
     }
 
@@ -166,10 +174,11 @@ func (s *scanner) scanForWhitespace() (*token, error) {
     runes, err = s.peek(1)
     if err != nil && err != io.EOF {
       s.offset = offset
+      s.lineno = lineno
       return nil, err
     }
   }
-  return &token{runes:rs}, nil
+  return &token{runes:rs, ttype:WHITESPACE, offset:offset, lineno:lineno}, nil
 }
 
 // for our purposes, anything that isn't whitspace should be collapsed
@@ -186,11 +195,13 @@ func (s *scanner) isIdent(runes []rune) bool {
 func (s *scanner) scanForIdent() (*token, error) {
   var rs []rune
   offset := s.offset
+  lineno := s.lineno
 
   // back out if we are scanning starting from non whitespace
   runes, err := s.peek(2)
   if err != nil && err != io.EOF {
     s.offset = offset
+    s.lineno = lineno
     return nil, err
   }
   for s.isIdent(runes) && !s.isComment(runes) {
@@ -204,6 +215,7 @@ func (s *scanner) scanForIdent() (*token, error) {
         break
       }
       s.offset = offset
+      s.lineno = lineno
       return nil, err
     }
 
@@ -211,10 +223,11 @@ func (s *scanner) scanForIdent() (*token, error) {
     runes, err = s.peek(2)
     if err != nil && err != io.EOF {
       s.offset = offset
+      s.lineno = lineno
       return nil, err
     }
   }
-  return &token{runes:rs}, nil
+  return &token{runes:rs, ttype:IDENT, offset:offset, lineno:lineno}, nil
 }
 
 // test for comments staring with '//' and '/*' and '--'
@@ -234,11 +247,13 @@ func (s *scanner) isComment(runes []rune) bool {
 func (s *scanner) scanForComment() (*token, error) {
   var rs []rune
   offset := s.offset
+  lineno := s.lineno
 
   // peek 2 runes
   runes, err := s.peek(2)
   if err != nil && err != io.EOF {
     s.offset = offset
+    s.lineno = lineno
     return nil, err
   }
 
@@ -255,6 +270,7 @@ func (s *scanner) scanForComment() (*token, error) {
           break
         }
         s.offset = offset
+        s.lineno = lineno
         return nil, err
       }
 
@@ -262,6 +278,7 @@ func (s *scanner) scanForComment() (*token, error) {
       runes, err = s.peek(1)
       if err != nil && err != io.EOF {
         s.offset = offset
+        s.lineno = lineno
         return nil, err
       }
     }
@@ -277,6 +294,7 @@ func (s *scanner) scanForComment() (*token, error) {
           break
         }
         s.offset = offset
+        s.lineno = lineno
         return nil, err
       }
 
@@ -284,6 +302,7 @@ func (s *scanner) scanForComment() (*token, error) {
       runes, err = s.peek(1)
       if err != nil && err != io.EOF {
         s.offset = offset
+        s.lineno = lineno
         return nil, err
       }
     }
@@ -306,6 +325,7 @@ func (s *scanner) scanForComment() (*token, error) {
           break
         }
         s.offset = offset
+        s.lineno = lineno
         return nil, err
       }
 
@@ -313,11 +333,12 @@ func (s *scanner) scanForComment() (*token, error) {
       runes, err = s.peek(1)
       if err != nil && err != io.EOF {
         s.offset = offset
+        s.lineno = lineno
         return nil, err
       }
     }
   }
-  return &token{runes:rs}, nil
+  return &token{runes:rs, ttype:COMMENT, offset:offset, lineno:lineno}, nil
 }
 
 // simple non-errorable test for has more tokens
