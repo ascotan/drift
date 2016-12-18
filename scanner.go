@@ -13,7 +13,6 @@ const (
 
 type token struct {
   runes []rune
-  width int
 }
 
 type scanner struct {
@@ -21,6 +20,7 @@ type scanner struct {
   offset int64
   lineno int
 }
+
 func NewScanner(b []byte) (*scanner) {
   return &scanner{
     reader: bytes.NewReader(b),
@@ -30,48 +30,36 @@ func NewScanner(b []byte) (*scanner) {
 }
 
 // This method reads the next rune from the buffer
-func (s *scanner) next() (rune, error)  {
-  ch, size, err := s.reader.ReadRune()
+// if we read EOF then we will return EOF, io.EOF,
+// if it's an error we will return NUL, and the error
+// otherwise we'll return the next rune (which can be 1-4 bytes)
+// This method will also keep track of the current linenumber in the buffer
+// and the byte offset in the buffer
+func (s *scanner) next() ([]rune, error)  {
+  ch, _, err := s.reader.ReadRune()
   if err != nil {
     if err != io.EOF {
-      return rune(0), err
+      return []rune{rune(0)}, err
     }
     // ReadRune() will return io.EOF as an error when the EOF is reached
     // io.EOF is an error however, but we need a rune
-    return EOF, io.EOF
+    return []rune{EOF}, io.EOF
   }
   if ch == '\n' {
     s.lineno++
   }
-  s.offset += int64(size)  // move the read pointer
-  return ch, nil
+  s.offset++  // move the read pointer
+  return []rune{ch}, nil
 }
 
-func (s *scanner) peek() (rune, error) {
-  offset := s.offset
-  ch, _, err := s.reader.ReadRune()
-  if err != nil {
-    if err := s.seek(offset); err != nil {
-      panic("can't unroll peek")
-    }
-    return EOF, err
-  }
-  err = s.reader.UnreadRune()
-  if err != nil {
-    if err := s.seek(offset); err != nil {
-      panic("can't unroll peek")
-    }
-    return EOF, err
-  }
-  return ch, nil
-}
-
-func (s *scanner) multipeek(count int) ([]rune, error) {
+// peek will return a rune slice for the next N runes
+// we can't peek less than 0 runes, that will throw io.EOF
+// if we peek past the EOF we'll return the runes upto EOF and return io.EOF
+func (s *scanner) peek(count int) ([]rune, error) {
   offset := s.offset
   var runes []rune
 
-  // O(n) of for mutlipeek is the byte size of the reader data
-  if count < 1 || (int64(count) > s.reader.Size()) {
+  if count < 1 {
     return nil, io.EOF
   }
 
@@ -79,21 +67,28 @@ func (s *scanner) multipeek(count int) ([]rune, error) {
     ch, _, err := s.reader.ReadRune()
     if err != nil {
       if err := s.seek(offset); err != nil {
-        panic("can't unroll multipeek")
+        panic("can't unroll peek")
       }
-      return nil, err
+      if err == io.EOF {
+        // if we scan past the EOF return runes up to the EOF
+        // this allows for less complex peek/peek logic elsewhere
+        return runes, err
+      } else {
+        return nil, err
+      }
     }
     runes = append(runes, ch)
   }
   // unroll - can use unreadrune because it requires having called readrune
   // as the previous call
   if err := s.seek(offset); err != nil {
-    panic("can't unroll multipeek")
+    panic("can't unroll peek")
   }
+
   return runes, nil
 }
 
-// we do it this way rather than bytes.Reader.Seek because we want to
+// the 'offset' is in runes no bytes, this is because we want to
 // get the lineno
 // if you attempt to seek past the end of file, we'll just fast forward to EOF
 // and then exit
@@ -116,6 +111,7 @@ func (s *scanner) seek(offset int64) (error) {
   // now run next() for each offset
   for i := int64(0); i < offset; i++ {
     _, err := s.next()
+    //log.Println(string(runes))
     // if we hit an error running next() we'll revert to the pre-seek position
     // and return the error
     if err != nil {
@@ -131,122 +127,94 @@ func (s *scanner) seek(offset int64) (error) {
   return nil
 }
 
-func (s *scanner) HasMoreTokens() (bool) {
-  ch, err := s.peek()
-  if ch == EOF || err != nil {
-    return false
-  }
-  return true
-}
-
-func (s *scanner) NextToken() (*token, error) {
-  r, err := s.peek()
-  if err != nil {
-    return nil, err
-  }
-  // skip whitespace
-  if s.isWhitespace(r) {
-    s.scanForWhitespace()
-    return s.NextToken()
-  }
-  // if s.isComment(r) {
-  //   // skip the comment
-  //   s.scanForComment()
-  //   return s.NextToken()
-  // }
-  if s.isIdent(r) {
-    return s.scanForIdent()
-  }
-  return &token{runes:[]rune{r}}, nil
-}
-
 // test for start of whitespace
-func (s *scanner) isWhitespace(ch rune) bool {
-  return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
+func (s *scanner) isWhitespace(runes []rune) bool {
+  if len(runes) >= 1 {
+    return runes[0] == ' ' || runes[0] == '\t' || runes[0] == '\n' || runes[0] == '\r'
+  }
+  return false
 }
 
 // consumes whitespace at the current scanner offset
+// attempting to consume whitespace from a non-whitespace rune errors
 func (s *scanner) scanForWhitespace() (*token, error) {
   var rs []rune
   offset := s.offset
-  width := 0
 
   // back out if we are scanning starting from non whitespace
-  ch, err := s.peek()
-  if err != nil{
-    return nil, err
-  }
-  if !s.isWhitespace(ch) {
-    return nil, errors.New("cannot scan whitespace from non-whitespace rune")
-  }
-
-  // we can now start pulling the whitespace runes
-  ch, err = s.next()
-  // if we get an error we reset the offset and back out
-  if err != nil {
+  runes, err := s.peek(1)
+  if err != nil && err != io.EOF {
     s.offset = offset
     return nil, err
   }
-  for s.isWhitespace(ch) {
-    rs = append(rs, ch)
-    width += int(s.offset - (offset + int64(width)))
-    var err error
-    ch, err = s.next()
+
+  for s.isWhitespace(runes) {
+    // we can now start pulling the whitespace runes
+    consumed, err := s.next()
+    // if we get an error we reset the offset and back out
     if err != nil {
-      // if the next character is EOF lets end this
       if err == io.EOF {
+        // we shouldn't get here, but if we do read EOF off of next() we'll
+        // just break and return the rs
         break
       }
       s.offset = offset
       return nil, err
     }
+
+    rs = append(rs, consumed...)
+    runes, err = s.peek(1)
+    if err != nil && err != io.EOF {
+      s.offset = offset
+      return nil, err
+    }
   }
-  return &token{runes:rs, width:width}, nil
+  return &token{runes:rs}, nil
 }
 
 // for our purposes, anything that isn't whitspace should be collapsed
 // this allows us to reconstruct things with whitespace in the parser
-func (s *scanner) isIdent(ch rune) bool {
-  return !s.isWhitespace(ch) && ch != EOF
+func (s *scanner) isIdent(runes []rune) bool {
+  if len(runes) >= 1 {
+    return !s.isWhitespace(runes) && runes[0] != EOF
+  }
+  return false
 }
 
 // consumes ident runes at the current scanner offset
+// attempting to consume an ident from a non-ident rune errors
 func (s *scanner) scanForIdent() (*token, error) {
   var rs []rune
   offset := s.offset
-  width := 0
 
-  // back out if we are scanning starting from a non-ident
-  ch, err := s.peek()
-  if err != nil{
-    return nil, err
-  }
-  if !s.isIdent(ch) {
-    return nil, errors.New("cannot scan ident from non-ident rune")
-  }
-
-  // we can now start pulling the ident
-  ch, err = s.next()
-  // if we get an error we reset the offset and back out
-  if err != nil {
+  // back out if we are scanning starting from non whitespace
+  runes, err := s.peek(2)
+  if err != nil && err != io.EOF {
     s.offset = offset
     return nil, err
   }
-  for s.isIdent(ch) {
-    rs = append(rs, ch)
-    width += int(s.offset - (offset + int64(width)))
-    var err error
-    ch, err = s.next()
+  for s.isIdent(runes) && !s.isComment(runes) {
+    // we can now start pulling the whitespace runes
+    consumed, err := s.next()
+    // if we get an error we reset the offset and back out
     if err != nil {
-      // if the next character is EOF lets end this
       if err == io.EOF {
+        // we shouldn't get here, but if we do read EOF off of next() we'll
+        // just break and return the rs
         break
       }
       s.offset = offset
       return nil, err
     }
+
+    rs = append(rs, consumed...)
+    runes, err = s.peek(2)
+    if err != nil && err != io.EOF {
+      s.offset = offset
+      return nil, err
+    }
   }
-  return &token{runes:rs, width:width}, nil
+  return &token{runes:rs}, nil
 }
 
 // test for comments staring with '//' and '/*' and '--'
@@ -262,66 +230,136 @@ func (s *scanner) isComment(runes []rune) bool {
 }
 
 // consumes comments at the current scanner offset
+// attempting to consume a comment from a non-comment rune errors
 func (s *scanner) scanForComment() (*token, error) {
   var rs []rune
   offset := s.offset
-  width := 0
 
-  // back out if we are scanning starting from a non-comment
-  runes, err := s.multipeek(2)
-  if err != nil{
+  // peek 2 runes
+  runes, err := s.peek(2)
+  if err != nil && err != io.EOF {
+    s.offset = offset
     return nil, err
   }
-  if !s.isComment(runes) {
-    return nil, errors.New("cannot scan ident from non-comment runes")
-  }
 
-  // scan a c++ style
+  // consume a c++ style comment
   if (runes[0] == '/' && runes[1] == '/') {
-    lineno := s.lineno
-    ch, err := s.next()
-    // if we get an error we reset the offset and back out
-    if err != nil {
-      s.offset = offset
-      return nil, err
-    }
-    for lineno == s.lineno {
-      rs = append(rs, ch)
-      width += int(s.offset - (offset + int64(width)))
-      var err error
-      ch, err = s.next()
+
+    for len(runes) > 0 && runes[0] != '\n' && runes[0] != EOF {
+      consumed, err := s.next()
+      // if we get an error we reset the offset and back out
       if err != nil {
-        // if the next character is EOF lets end this
         if err == io.EOF {
+          // we shouldn't get here, but if we do read EOF off of next() we'll
+          // just break and return the rs
           break
         }
         s.offset = offset
         return nil, err
       }
+
+      rs = append(rs, consumed...)
+      runes, err = s.peek(1)
+      if err != nil && err != io.EOF {
+        s.offset = offset
+        return nil, err
+      }
+    }
+  // consume a sql style comment
+  } else if (runes[0] == '-' && runes[1] == '-') {
+    for len(runes) > 0 && runes[0] != '\n' && runes[0] != EOF {
+      consumed, err := s.next()
+      // if we get an error we reset the offset and back out
+      if err != nil {
+        if err == io.EOF {
+          // we shouldn't get here, but if we do read EOF off of next() we'll
+          // just break and return the rs
+          break
+        }
+        s.offset = offset
+        return nil, err
+      }
+
+      rs = append(rs, consumed...)
+      runes, err = s.peek(1)
+      if err != nil && err != io.EOF {
+        s.offset = offset
+        return nil, err
+      }
+    }
+  //consume a java style comment
+  } else if (runes[0] == '/' && runes[1] == '*') {
+    // we exit if we peek EOF, err or the last 2 consumed runes are */
+    for len(runes) > 0 && runes[0] != EOF {
+      // exit this if we have consumed */ previously
+      if len(rs) > 1 {
+        if rs[len(rs)-2] == '*' && rs[len(rs)-1] == '/' {
+          break
+        }
+      }
+      consumed, err := s.next()
+      // if we get an error we reset the offset and back out
+      if err != nil {
+        if err == io.EOF {
+          // we shouldn't get here, but if we do read EOF off of next() we'll
+          // just break and return the rs
+          break
+        }
+        s.offset = offset
+        return nil, err
+      }
+
+      rs = append(rs, consumed...)
+      runes, err = s.peek(1)
+      if err != nil && err != io.EOF {
+        s.offset = offset
+        return nil, err
+      }
     }
   }
+  return &token{runes:rs}, nil
+}
 
-  // // parse a java style comment
-  // // scan until we hit a */
-  // } else if ch == '/' && next == '*' {
-  //   for ch != '*' || next != '/' {
-  //     rs = append(rs, ch)
-  //     ch, err = s.next()
-  //     if err != nil {
-  //       return nil, err
-  //     }
-  //     next, err = s.peek();
-  //     if err != nil {
-  //       return nil, err
-  //     }
-  //   }
-  //   // grab the closing characters
-  //   rs = append(rs, ch)
-  //   ch, err = s.next()
-  //   if err != nil {
-  //     return nil, err
-  //   }
-  //   rs = append(rs, ch)
-  // }
-  return &token{runes:rs, width:width}, nil
+// simple non-errorable test for has more tokens
+// errors are interpreted as false - no token for you :(
+func (s *scanner) HasMoreTokens() (bool) {
+  runes, err := s.peek(1)
+  if err != nil && len(runes) < 1 {
+    return false
+  }
+  return true
+}
+
+func (s *scanner) NextToken() (*token, error) {
+  var runes []rune
+  runes, err := s.peek(2)
+  // we can run into EOF if only 1 character is left
+  if err != nil && len(runes) < 1 {
+    return nil, err
+  }
+  // at this point runes can contain either 1 or 2 runes
+  if s.isWhitespace(runes) {
+    // skip whitespace
+    _, err := s.scanForWhitespace()
+    if err != nil {
+      return nil, err
+    }
+    return s.NextToken()
+  }
+  if s.isComment(runes) {
+    // skip comments
+    _, err :=s.scanForComment()
+    if err != nil {
+      return nil, err
+    }
+    return s.NextToken()
+  }
+  if s.isIdent(runes) {
+    ident, err := s.scanForIdent()
+    if err != nil {
+      return nil, err
+    }
+    return ident, nil
+  }
+  return nil, errors.New("Unknown token type")
 }
